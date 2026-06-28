@@ -35,8 +35,8 @@ class InferenceEngine:
     
     def __init__(
         self,
-        model_name: str = "sshleifer/tiny-gpt2",
-        use_local_model: bool = False
+        model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
+        use_local_model: bool = True
     ) -> None:
         """
         Args:
