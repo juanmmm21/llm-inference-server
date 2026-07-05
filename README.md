@@ -1,90 +1,90 @@
 # LLM Inference Server
 
-Servidor de inferencia de alto rendimiento optimizado para la ejecucion de modelos de lenguaje causal. Este modulo implementa tecnicas avanzadas de gestion de concurrencia y optimizacion de throughput, especificamente agrupamiento dinamico de peticiones (Dynamic Request Batching) y transmision de respuestas token a token (Streaming) mediante Server-Sent Events (SSE).
+High-performance inference server optimized for running causal language models. This module implements advanced concurrency management and throughput optimization techniques, specifically Dynamic Request Batching and token-by-token response streaming (Streaming) via Server-Sent Events (SSE).
 
-El servidor esta disenado para ser compatible tanto con aceleradores locales (MPS/CUDA) cargando modelos CausalLM de Hugging Face, como con entornos offline sin recursos de GPU, gracias a un motor de contingencia semantica determinista.
+The server is designed to be compatible both with local accelerators (MPS/CUDA) loading Hugging Face CausalLM models, and with offline environments with no GPU resources, thanks to a deterministic semantic fallback engine.
 
-## Arquitectura del Sistema y Dynamic Batching
+## System Architecture and Dynamic Batching
 
-La arquitectura del servidor esta optimizada para mitigar el cuello de botella tradicional en inferencia de LLMs: la transferencia de pesos de la memoria global (VRAM/RAM) a las unidades de calculo del procesador (ALUs).
+The server's architecture is optimized to mitigate the traditional bottleneck in LLM inference: transferring weights from global memory (VRAM/RAM) to the processor's compute units (ALUs).
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Cliente1 as Cliente A
-    actor Cliente2 as Cliente B
+    actor Cliente1 as Client A
+    actor Cliente2 as Client B
     participant API as FastAPI Endpoint
     participant Queue as asyncio.Queue
     participant Worker as Batching Worker
     participant Engine as Inference Engine
 
-    Cliente A->>API: POST /generate (Prompt A)
-    Note over API: Crea QueueItem con Future
-    API->>Queue: Encolar QueueItem A
-    Note over Worker: Cola detecta elemento.<br/>Inicia ventana de 50ms.
+    Client A->>API: POST /generate (Prompt A)
+    Note over API: Creates QueueItem with Future
+    API->>Queue: Enqueue QueueItem A
+    Note over Worker: Queue detects item.<br/>Starts 50ms window.
     
-    Cliente B->>API: POST /generate (Prompt B)
-    API->>Queue: Encolar QueueItem B
+    Client B->>API: POST /generate (Prompt B)
+    API->>Queue: Enqueue QueueItem B
     
-    Note over Worker: Ventana expira o Batch lleno (Max 16).<br/>Extrae [A, B].
-    Worker->>Engine: generate_batch([Prompt A, Prompt B]) en ThreadPool
-    Note over Engine: Inferencia paralela (PyTorch / Fallback)
-    Engine-->>Worker: Retorna [Text A, Text B]
-    Worker-->>API: Resuelve Future A y Future B
-    API-->>Cliente A: HTTP Response (Text A)
-    API-->>Cliente B: HTTP Response (Text B)
+    Note over Worker: Window expires or batch full (Max 16).<br/>Pulls [A, B].
+    Worker->>Engine: generate_batch([Prompt A, Prompt B]) in ThreadPool
+    Note over Engine: Parallel inference (PyTorch / Fallback)
+    Engine-->>Worker: Returns [Text A, Text B]
+    Worker-->>API: Resolves Future A and Future B
+    API-->>Client A: HTTP Response (Text A)
+    API-->>Client B: HTTP Response (Text B)
 ```
 
-### 1. Mecanismo de Dynamic Request Batching
+### 1. Dynamic Request Batching Mechanism
 
-En lugar de procesar cada peticion de inferencia de forma secuencial (generando un sobrecoste critico al cargar los pesos del modelo por cada consulta) o rechazar peticiones concurrentes, el servidor implementa un despachador asincrono en segundo plano:
+Instead of processing each inference request sequentially (incurring a critical overhead from loading the model weights on every query) or rejecting concurrent requests, the server implements a background asynchronous dispatcher:
 
-1.  **Encolado Asincrono:** Cada peticion entrante al endpoint `/generate` genera una estructura `QueueItem` que encapsula el prompt, la cantidad maxima de tokens a generar, y un objeto `asyncio.Future`. El item se inserta en una cola thread-safe `asyncio.Queue`.
-2.  **Ventana de Agrupamiento:** Al ingresar un elemento a la cola vacia, el `dynamic_batch_worker` despierta e inicia un bucle de espera de duracion configurable ($\tau = 50\text{ ms}$). Durante esta ventana, recolecta de forma no bloqueante todas las peticiones concurrentes subsiguientes.
-3.  **Restricciones de Lote:** El worker detiene la acumulacion de elementos si la ventana temporal expira o si el lote alcanza el tamano maximo permitido ($N_{\text{max}} = 16$).
-4.  **Ejecucion en Ejecutor de Hilos (Thread Pool):** La inferencia de modelos de Deep Learning bloquea el Global Interpreter Lock (GIL) de Python al realizar calculos pesados en C++/CUDA. Para evitar congelar el bucle de eventos asincrono de FastAPI, la ejecucion del lote se delega a un ejecutor externo mediante `loop.run_in_executor(None, engine.generate_batch, prompts, max_tokens)`.
-5.  **Despacho y Resolucion:** Al finalizar la inferencia en lote, el worker asocia las respuestas decodificadas a sus respectivos `Futures`, notificando y liberando las peticiones HTTP suspendidas.
+1.  **Asynchronous Enqueuing:** Each incoming request to the `/generate` endpoint creates a `QueueItem` structure that encapsulates the prompt, the maximum number of tokens to generate, and an `asyncio.Future` object. The item is inserted into a thread-safe `asyncio.Queue`.
+2.  **Batching Window:** When an item enters the empty queue, the `dynamic_batch_worker` wakes up and starts a configurable wait loop ($\tau = 50\text{ ms}$). During this window, it non-blockingly collects all subsequent concurrent requests.
+3.  **Batch Constraints:** The worker stops accumulating items if the time window expires or if the batch reaches the maximum allowed size ($N_{\text{max}} = 16$).
+4.  **Execution in a Thread Pool Executor:** Deep learning model inference blocks Python's Global Interpreter Lock (GIL) while doing heavy C++/CUDA computation. To avoid freezing FastAPI's async event loop, batch execution is delegated to an external executor via `loop.run_in_executor(None, engine.generate_batch, prompts, max_tokens)`.
+5.  **Dispatch and Resolution:** When batch inference finishes, the worker associates the decoded responses with their respective `Futures`, notifying and releasing the suspended HTTP requests.
 
-### 2. Streaming de Inferencia mediante Server-Sent Events (SSE)
+### 2. Inference Streaming via Server-Sent Events (SSE)
 
-Para optimizar el tiempo hasta el primer token (TTFT - *Time to First Token*), el endpoint `/generate_stream` expone una conexion persistente unidireccional utilizando el protocolo Server-Sent Events (SSE). El flujo de tokens se gestiona de la siguiente manera:
+To optimize time to first token (TTFT), the `/generate_stream` endpoint exposes a persistent one-way connection using the Server-Sent Events (SSE) protocol. Token flow is managed as follows:
 
-*   El servidor inicializa un generador que consume el motor de inferencia.
-*   En cada iteracion del generador, se emite un fragmento de texto (token o subpalabra) encapsulado en un evento de tipo `token` estructurado como JSON:
+*   The server initializes a generator that consumes the inference engine.
+*   On each generator iteration, a text fragment (token or subword) is emitted, encapsulated in a `token`-type event structured as JSON:
     ```json
     {
       "event": "token",
-      "id": "uuid-v4-identificador",
-      "data": "siguiente_palabra "
+      "id": "uuid-v4-identifier",
+      "data": "next_word "
     }
     ```
-*   Al concluir la generacion, el flujo envia un mensaje de control `"data": "[DONE]"` con evento `done` y cierra la conexion de forma segura.
+*   When generation finishes, the stream sends a `"data": "[DONE]"` control message with a `done` event and closes the connection safely.
 
-### 3. Motor de Inferencia y Fallback Offline
+### 3. Inference Engine and Offline Fallback
 
-El modulo `InferenceEngine` gestiona la abstraccion del hardware. Admite dos modos operativos:
+The `InferenceEngine` module handles hardware abstraction. It supports two operating modes:
 
-*   **Modo Online / Local:** Carga modelos basados en arquitectura CausalLM (por ejemplo, `sshleifer/tiny-gpt2`) mediante PyTorch y Transformers en la plataforma de computo mas veloz disponible en el sistema (MPS en hardware Apple Silicon, CUDA en sistemas Nvidia, o CPU de forma generalizada).
-*   **Modo de Simulacion / Fallback Offline:** Si el entorno carece de recursos de GPU, conexion para descargar pesos, o si fallan las dependencias del compilador, se activa un motor heuristico semantico. Este motor analiza la presencia de tokens clave en el prompt para estructurar respuestas coherentes sobre conceptos de IA a una tasa simulada de generacion (usando retardos aleatorios entre `0.01` y `0.04` segundos por palabra para replicar el comportamiento de streaming real).
+*   **Online / Local Mode:** Loads CausalLM-architecture models (e.g. `sshleifer/tiny-gpt2`) via PyTorch and Transformers on the fastest compute platform available on the system (MPS on Apple Silicon hardware, CUDA on Nvidia systems, or CPU as a general fallback).
+*   **Simulation / Offline Fallback Mode:** If the environment lacks GPU resources, a connection to download weights, or if compiler dependencies fail, a heuristic semantic engine kicks in. This engine analyzes the presence of key tokens in the prompt to structure coherent responses about AI concepts at a simulated generation rate (using random delays between `0.01` and `0.04` seconds per word to replicate real streaming behavior).
 
-## Conexión con el Ecosistema
+## Connection to the Ecosystem
 
-Dentro de la suite **ai-core-infra**, este servidor cumple funciones criticas:
-1.  **semantic-model-router:** El router semantico analiza las peticiones entrantes de los clientes y las redirige hacia este servidor de inferencia o hacia APIs propietarias externas basandose en la complejidad y sensibilidad de la query.
-2.  **orchestra-agents:** Los agentes y planificadores asincronos realizan consultas recurrentes y concurrentes a este modulo para resolver reflexiones, invocar herramientas y sintetizar observaciones sin penalizar los hilos principales de ejecucion.
+Within the **ai-core-infra** suite, this server serves critical functions:
+1.  **semantic-model-router:** The semantic router analyzes incoming client requests and redirects them to this inference server or to external proprietary APIs based on the query's complexity and sensitivity.
+2.  **orchestra-agents:** Asynchronous agents and planners make recurring, concurrent queries to this module to resolve reflections, invoke tools, and synthesize observations without penalizing the main execution threads.
 
-## Estructura de Archivos
+## File Structure
 
-*   `inference_engine.py`: Modulo encapsulado que maneja la carga del modelo de Hugging Face, la tokenizacion por lotes, la inferencia acelerada por hardware y los metodos de simulacion offline.
-*   `server.py`: Definicion del servidor FastAPI, implementacion del despachador dinamico (`dynamic_batch_worker`) y de los endpoints de comunicacion.
-*   `test_server.py`: Suite de test unitarios asincronos que validan el comportamiento concurrente del batching, el comportamiento ante errores e hilos cancelados, y el correcto funcionamiento del streaming SSE.
-*   `example.py`: Script interactivo cliente-servidor que inicializa el servidor FastAPI, envia peticiones secuenciales y simula rafagas concurrentes para demostrar el dynamic batching visualizando logs en vivo.
+*   `inference_engine.py`: Encapsulated module that handles loading the Hugging Face model, batch tokenization, hardware-accelerated inference, and offline simulation methods.
+*   `server.py`: FastAPI server definition, implementation of the dynamic dispatcher (`dynamic_batch_worker`) and the communication endpoints.
+*   `test_server.py`: Asynchronous unit test suite that validates batching's concurrent behavior, behavior under errors and cancelled threads, and correct operation of SSE streaming.
+*   `example.py`: Interactive client-server script that starts the FastAPI server, sends sequential requests, and simulates concurrent bursts to demonstrate dynamic batching while displaying live logs.
 
-## Instalacion y Servido
+## Installation and Serving
 
-### 1. Instalar Dependencias
+### 1. Install Dependencies
 
-Asegurese de habilitar el entorno virtual del proyecto antes de realizar la instalacion:
+Make sure to enable the project's virtual environment before installing:
 
 ```bash
 python3 -m venv .venv
@@ -92,28 +92,28 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Ejecutar Pruebas Automatizadas
+### 2. Run Automated Tests
 
-La suite de pruebas simula la llegada de peticiones concurrentes y verifica que sean agrupadas y resueltas correctamente en un unico lote de ejecucion:
+The test suite simulates the arrival of concurrent requests and verifies that they are correctly grouped and resolved in a single execution batch:
 
 ```bash
 .venv/bin/python -m unittest test_server.py
 ```
 
-### 3. Arrancar el Servidor Local
+### 3. Start the Local Server
 
-Puede iniciar el servidor FastAPI directamente usando Uvicorn:
+You can start the FastAPI server directly using Uvicorn:
 
 ```bash
 .venv/bin/python -m uvicorn server:app --host 127.0.0.1 --port 8000 --log-level info
 ```
 
-### 4. Demostracion en Vivo (Dynamic Batching)
+### 4. Live Demonstration (Dynamic Batching)
 
-Con el servidor corriendo en una terminal, ejecute en otra terminal activa:
+With the server running in one terminal, run in another active terminal:
 
 ```bash
 .venv/bin/python example.py
 ```
 
-Este script disparara multiples llamadas en paralelo de forma asincrona para observar el agrupamiento dinamico reduciendo la latencia media y mostrando la emision del streaming por consola.
+This script will fire multiple parallel calls asynchronously to observe dynamic batching reducing average latency and showing streaming output in the console.
