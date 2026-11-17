@@ -1,0 +1,35 @@
+{
+  "label": "llm-inference-server 0.1.0 (llama.cpp backend)",
+  "rows": [
+    {
+      "concurrency": 1,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 45.153152453000075,
+      "ttft_p50": 0.17087405999996008,
+      "ttft_p95": 0.20680301400011558,
+      "decode_tps_p50": 48.07093171278423,
+      "throughput_tps": 45.35674451815438
+    },
+    {
+      "concurrency": 4,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 22.690079825999874,
+      "ttft_p50": 0.5223914030000287,
+      "ttft_p95": 0.8127964287500618,
+      "decode_tps_p50": 24.61030127474919,
+      "throughput_tps": 90.2597088994486
+    },
+    {
+      "concurrency": 8,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 17.18552287500006,
+      "ttft_p50": 1.0829234394998366,
+      "ttft_p95": 1.143337175000056,
+      "decode_tps_p50": 16.889180755318428,
+      "throughput_tps": 119.17007209476556
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "label": "Ollama 0.40.16 (Docker, OLLAMA_NUM_PARALLEL=8)",
+  "rows": [
+    {
+      "concurrency": 1,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 44.245175433999975,
+      "ttft_p50": 0.09604365550012517,
+      "ttft_p95": 0.1322250439995969,
+      "decode_tps_p50": 47.91532196166742,
+      "throughput_tps": 46.287532593355365
+    },
+    {
+      "concurrency": 4,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 18.528705160000754,
+      "ttft_p50": 0.3481348689997503,
+      "ttft_p95": 0.4984301592498923,
+      "decode_tps_p50": 29.998168915085508,
+      "throughput_tps": 110.53119914829044
+    },
+    {
+      "concurrency": 8,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 14.198318719999406,
+      "ttft_p50": 0.15628431350023675,
+      "ttft_p95": 0.7602260619996741,
+      "decode_tps_p50": 18.81145701879317,
+      "throughput_tps": 144.2424304164434
+    }
+  ]
+}

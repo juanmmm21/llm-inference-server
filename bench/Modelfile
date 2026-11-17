@@ -1,0 +1,10 @@
+FROM /models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+TEMPLATE """{{- range .Messages }}<|im_start|>{{ .Role }}
+{{ .Content }}<|im_end|>
+{{ end }}<|im_start|>assistant
+"""
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|endoftext|>"
+PARAMETER num_ctx 2048
+PARAMETER num_thread 4
+PARAMETER temperature 0
