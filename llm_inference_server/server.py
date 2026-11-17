@@ -1,210 +1,155 @@
-import asyncio
-import logging
+"""OpenAI-compatible HTTP API over the engine.
+
+Endpoints: ``POST /v1/chat/completions`` and ``POST /v1/completions`` (both with ``stream``),
+``GET /v1/models``, ``GET /health`` and ``GET /metrics`` (engine, scheduler and KV-cache
+counters). Any OpenAI client works by pointing its base URL at ``http://host:port/v1``.
+"""
+
+from __future__ import annotations
+
+import json
+import time
 import uuid
-from typing import Optional
-from pydantic import BaseModel, Field
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
+
 from fastapi import FastAPI, HTTPException
-from sse_starlette.sse import EventSourceResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
-from .inference_engine import InferenceEngine
-
-# Configuracion de logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("llm_inference_server")
-
-app = FastAPI(
-    title="LLM Inference Server",
-    description="Servidor de inferencia de alto rendimiento con agrupamiento dinamico de peticiones y streaming."
-)
-
-# Inicializamos el motor de inferencia (por defecto simulado para portabilidad offline)
-engine = InferenceEngine(use_local_model=False)
-
-# Cola para el despachador de agrupamiento dinamico (Dynamic Batching)
-_batch_queue: Optional[asyncio.Queue] = None
-_worker_task: Optional[asyncio.Task] = None
-_active_loop: Optional[asyncio.AbstractEventLoop] = None
-
-def get_queue() -> asyncio.Queue:
-    global _batch_queue, _worker_task, _active_loop
-    try:
-        current_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        current_loop = None
-
-    if _batch_queue is None or _active_loop != current_loop:
-        if _worker_task is not None and not _worker_task.done():
-            _worker_task.cancel()
-        _batch_queue = asyncio.Queue()
-        _active_loop = current_loop
-        if current_loop is not None:
-            _worker_task = asyncio.create_task(dynamic_batch_worker())
-    elif _worker_task is None or _worker_task.done():
-        if current_loop is not None:
-            _worker_task = asyncio.create_task(dynamic_batch_worker())
-
-    return _batch_queue
-
-# Constantes del agrupamiento dinamico
-BATCH_WINDOW_SECONDS = 0.05  # Ventana de 50ms para acumular peticiones
-MAX_BATCH_SIZE = 16          # Capacidad maxima de agrupacion en una llamada al motor
+from .engine import AsyncLLMEngine
+from .scheduler import SamplingParams
 
 
-class GenerationRequest(BaseModel):
-    prompt: str = Field(..., description="El prompt de entrada para el modelo.")
-    max_tokens: int = Field(50, ge=1, le=512, description="Numero maximo de tokens a generar.")
-    temperature: float = Field(0.7, ge=0.0, le=1.0, description="Temperatura de muestreo.")
+class ChatMessage(BaseModel):
+    role: str
+    content: Union[str, List[Dict[str, Any]], None] = ""
+
+    def text(self) -> str:
+        if isinstance(self.content, list):
+            return "".join(part.get("text", "") for part in self.content if isinstance(part, dict))
+        return self.content or ""
 
 
-class GenerationResponse(BaseModel):
+class StreamOptions(BaseModel):
+    include_usage: bool = False
+
+
+class _Common(BaseModel):
+    model: Optional[str] = None
+    max_tokens: Optional[int] = Field(None, ge=1)
+    max_completion_tokens: Optional[int] = Field(None, ge=1)
+    temperature: float = Field(1.0, ge=0.0, le=2.0)
+    top_p: float = Field(1.0, gt=0.0, le=1.0)
+    top_k: int = Field(0, ge=0)
+    seed: Optional[int] = None
+    stop: Union[str, List[str], None] = None
+    stream: bool = False
+    stream_options: Optional[StreamOptions] = None
+    ignore_eos: bool = False
+
+    def params(self, default_max: int) -> SamplingParams:
+        stops = [self.stop] if isinstance(self.stop, str) else list(self.stop or [])
+        return SamplingParams(
+            max_tokens=self.max_completion_tokens or self.max_tokens or default_max,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            top_k=self.top_k,
+            seed=self.seed,
+            stop=stops,
+            ignore_eos=self.ignore_eos,
+        )
+
+
+class ChatCompletionRequest(_Common):
+    messages: List[ChatMessage]
+
+
+class CompletionRequest(_Common):
     prompt: str
-    generated_text: str
-    tokens_generated: int
-    latency_ms: float
-    batch_size_processed: int
 
 
-class QueueItem:
-    """Clase interna para encapsular los prompts y canalizar su resolucion asincrona."""
-    def __init__(self, prompt: str, max_tokens: int) -> None:
-        self.prompt = prompt
-        self.max_tokens = max_tokens
-        self.future: asyncio.Future = asyncio.get_event_loop().create_future()
+def create_app(engine: AsyncLLMEngine, model_name: Optional[str] = None, default_max_tokens: int = 256) -> FastAPI:
+    backend = engine.backend
+    served = model_name or backend.model_name
+    app = FastAPI(title="LLM Inference Server", description="Continuous batching, paged KV cache, OpenAI-compatible API.")
+    app.state.engine = engine
 
+    def check_model(name: Optional[str]) -> None:
+        if name and name != served:
+            raise HTTPException(status_code=404, detail=f"model {name!r} not served (this server serves {served!r})")
 
-async def dynamic_batch_worker() -> None:
-    """
-    Worker en segundo plano encargado de agrupar peticiones concorrentes
-    y enviarlas al modelo en lotes unificados (Dynamic Batching).
-    """
-    logger.info("Iniciando worker de dynamic batching...")
-    queue = get_queue()
-    while True:
+    @app.get("/health")
+    async def health() -> Dict[str, str]:
+        return {"status": "ok", "backend": backend.name, "model": served}
+
+    @app.get("/metrics")
+    async def metrics() -> Dict[str, Any]:
+        return engine.engine.metrics()
+
+    @app.get("/v1/models")
+    async def models() -> Dict[str, Any]:
+        return {"object": "list", "data": [{"id": served, "object": "model", "created": 0, "owned_by": backend.name}]}
+
+    async def run(prompt_ids: List[int], req: _Common, kind: str) -> Any:
+        params = req.params(default_max_tokens)
+        rid = ("chatcmpl-" if kind == "chat" else "cmpl-") + uuid.uuid4().hex[:24]
+        created = int(time.time())
+        if req.stream:
+            return StreamingResponse(stream(prompt_ids, params, req, kind, rid, created), media_type="text/event-stream")
+        text, n, reason = [], 0, None
         try:
-            # Esperamos a que entre la primera peticion
-            first_item = await queue.get()
-            items = [first_item]
-            
-            # Esperamos una pequeña ventana de tiempo para capturar mas peticiones entrantes
-            start_time = asyncio.get_event_loop().time()
-            while len(items) < MAX_BATCH_SIZE:
-                time_elapsed = asyncio.get_event_loop().time() - start_time
-                time_remaining = BATCH_WINDOW_SECONDS - time_elapsed
-                if time_remaining <= 0:
-                    break
-                    
-                try:
-                    # Intentamos recuperar elementos sin bloquear indefinidamente
-                    next_item = await asyncio.wait_for(queue.get(), timeout=time_remaining)
-                    items.append(next_item)
-                except asyncio.TimeoutError:
-                    break
-            
-            # Extraemos los prompts y procesamos el lote en el motor de inferencia
-            prompts = [item.prompt for item in items]
-            max_tokens_lote = max(item.max_tokens for item in items)
-            
-            logger.info(f"Procesando lote dinamico de tamaño: {len(items)}")
-            
-            # Ejecutamos la inferencia en un hilo aparte para no bloquear el bucle de eventos
-            loop = asyncio.get_event_loop()
-            start_inference = asyncio.get_event_loop().time()
-            
-            results = await loop.run_in_executor(
-                None, 
-                engine.generate_batch, 
-                prompts, 
-                max_tokens_lote
-            )
-            
-            latency_ms = (asyncio.get_event_loop().time() - start_inference) * 1000.0
-            
-            # Resolvemos los futures de cada peticion individual con su respuesta
-            for item, generated_text in zip(items, results):
-                if not item.future.cancelled():
-                    item.future.set_result((generated_text, len(items), latency_ms))
-                    
-            for _ in range(len(items)):
-                queue.task_done()
-                
-        except Exception as e:
-            logger.error(f"Error critico en worker de batching: {str(e)}")
-            await asyncio.sleep(1)
+            async for ev in engine.generate(prompt_ids, params):
+                text.append(ev.text_delta)
+                n += 1
+                reason = ev.finish_reason
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        usage = {"prompt_tokens": len(prompt_ids), "completion_tokens": n, "total_tokens": len(prompt_ids) + n}
+        content = "".join(text)
+        if kind == "chat":
+            choice = {"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": reason}
+            obj = "chat.completion"
+        else:
+            choice = {"index": 0, "text": content, "finish_reason": reason, "logprobs": None}
+            obj = "text_completion"
+        return JSONResponse({"id": rid, "object": obj, "created": created, "model": served, "choices": [choice], "usage": usage})
 
+    async def stream(prompt_ids: List[int], params: SamplingParams, req: _Common, kind: str, rid: str, created: int) -> AsyncIterator[str]:
+        obj = "chat.completion.chunk" if kind == "chat" else "text_completion"
 
-@app.on_event("startup")
-async def startup_event() -> None:
-    """Arranca el despachador dinamico al iniciar el servidor."""
-    global _batch_queue
-    _batch_queue = asyncio.Queue()  # Forzamos recreacion para enlazar al bucle de eventos activo
-    asyncio.create_task(dynamic_batch_worker())
+        def chunk(choice: Dict[str, Any], usage: Optional[Dict[str, int]] = None) -> str:
+            body: Dict[str, Any] = {"id": rid, "object": obj, "created": created, "model": served, "choices": [choice] if choice else []}
+            if usage is not None:
+                body["usage"] = usage
+            return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
 
-
-@app.post("/generate", response_model=GenerationResponse)
-async def generate(request: GenerationRequest) -> GenerationResponse:
-    """
-    Endpoint para generacion sincrona que aprovecha el Dynamic Batching.
-    """
-    start_time = asyncio.get_event_loop().time()
-    
-    # Creamos un elemento de cola y lo registramos
-    queue = get_queue()
-    item = QueueItem(request.prompt, request.max_tokens)
-    await queue.put(item)
-    
-    # Esperamos a que el worker resuelva la llamada
-    try:
-        generated_text, batch_size, inference_latency = await item.future
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Fallo en la generacion: {str(e)}")
-        
-    total_latency_ms = (asyncio.get_event_loop().time() - start_time) * 1000.0
-    
-    # Estimacion burda de tokens
-    tokens = len(generated_text.split())
-    
-    return GenerationResponse(
-        prompt=request.prompt,
-        generated_text=generated_text,
-        tokens_generated=tokens,
-        latency_ms=total_latency_ms,
-        batch_size_processed=batch_size
-    )
-
-
-@app.post("/generate_stream")
-async def generate_stream(request: GenerationRequest):
-    """
-    Endpoint de streaming mediante Server-Sent Events (SSE).
-    """
-    async def sse_generator():
-        # Ejecutamos el streaming de tokens directo del motor
-        loop = asyncio.get_event_loop()
-        
-        def run_stream():
-            return engine.generate_stream(request.prompt, request.max_tokens)
-            
-        generator = await loop.run_in_executor(None, run_stream)
-        
+        if kind == "chat":
+            yield chunk({"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None})
+        n = 0
         try:
-            for token_chunk in generator:
-                yield {
-                    "event": "token",
-                    "id": str(uuid.uuid4()),
-                    "data": token_chunk
-                }
-            # Indicamos finalizacion del stream
-            yield {
-                "event": "done",
-                "id": str(uuid.uuid4()),
-                "data": "[DONE]"
-            }
-        except Exception as e:
-            logger.error(f"Error en streaming de respuesta: {str(e)}")
-            yield {
-                "event": "error",
-                "id": str(uuid.uuid4()),
-                "data": f"Error: {str(e)}"
-            }
+            async for ev in engine.generate(prompt_ids, params):
+                n += 1
+                if ev.text_delta or ev.finished:
+                    if kind == "chat":
+                        delta = {"content": ev.text_delta} if ev.text_delta else {}
+                        yield chunk({"index": 0, "delta": delta, "finish_reason": ev.finish_reason})
+                    else:
+                        yield chunk({"index": 0, "text": ev.text_delta, "finish_reason": ev.finish_reason})
+        except ValueError as exc:
+            yield f"data: {json.dumps({'error': {'message': str(exc)}})}\n\n"
+        if req.stream_options and req.stream_options.include_usage:
+            yield chunk({}, {"prompt_tokens": len(prompt_ids), "completion_tokens": n, "total_tokens": len(prompt_ids) + n})
+        yield "data: [DONE]\n\n"
 
-    return EventSourceResponse(sse_generator())
+    @app.post("/v1/chat/completions")
+    async def chat(req: ChatCompletionRequest) -> Any:
+        check_model(req.model)
+        prompt = backend.apply_chat_template([{"role": m.role, "content": m.text()} for m in req.messages])
+        return await run(backend.tokenize(prompt, add_special=False), req, "chat")
+
+    @app.post("/v1/completions")
+    async def completions(req: CompletionRequest) -> Any:
+        check_model(req.model)
+        return await run(backend.tokenize(req.prompt, add_special=True), req, "completion")
+
+    return app

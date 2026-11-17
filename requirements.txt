@@ -1,6 +1,7 @@
 fastapi>=0.100.0
 uvicorn>=0.22.0
-sse-starlette>=1.6.0
 pydantic>=2.0
-torch
+numpy>=1.20
+jinja2>=3.1
 httpx>=0.24.0
+# backends (pick one): llama-cpp-python | mlx mlx-lm | torch transformers

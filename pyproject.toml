@@ -12,11 +12,16 @@ authors = [{ name = "Juan Martos Cuevas", email = "martoscuevasjuan@gmail.com" }
 dependencies = [
     "fastapi>=0.100",
     "uvicorn>=0.22",
-    "sse-starlette>=1.6",
     "pydantic>=2.0",
+    "numpy>=1.20",
+    "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]
+llamacpp = ["llama-cpp-python>=0.3.16"]
+mlx = ["mlx>=0.25", "mlx-lm>=0.25"]
+torch = ["torch>=2.1", "transformers>=4.45"]
+bench = ["httpx>=0.24"]
 dev = ["pytest>=8", "ruff>=0.6", "httpx>=0.24"]
 
 [tool.hatch.build.targets.wheel]
