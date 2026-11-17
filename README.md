@@ -107,8 +107,7 @@ What the numbers say:
 * **Under load, continuous batching works** — aggregate throughput goes from 45 to 119 tokens/s
   (2.6×) with 8 clients — **but Ollama scales further**: 144 tokens/s, so this engine reaches
   83 % of Ollama at 8 clients and its TTFT under load is worse (the median request waits ~1 s
-  for the first token, against 0.16 s). Closing that gap is the next piece of work: profile the
-  mixed prefill+decode steps and the HTTP thread under contention.
+  for the first token, against 0.16 s).
 * A finding along the way: llama.cpp built with OpenMP (llama-cpp-python's default) **halves
   its speed when `llama_decode` is called from a thread other than the main one** (41 vs 20
   tokens/s measured here: a second OpenMP team competes for the same cores). The server
@@ -129,8 +128,7 @@ Raw results: `bench/results/*.json`.
 
 **MLX** was exercised on MLX's Linux CPU build (0.32.4): correct, but that build is not meant
 for speed (4-bit checkpoints take ~19 s per token even in `mlx-lm` itself), so it is not in the
-table. Its real target is Apple silicon, which this session did not have; benchmark it there with
-the same script.
+table. Its real target is Apple silicon, where it has not been measured.
 
 ## Using it as a package
 
