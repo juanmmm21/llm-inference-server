@@ -80,6 +80,28 @@ Within the **ai-core-infra** suite, this server serves critical functions:
 *   `test_server.py`: Asynchronous unit test suite that validates batching's concurrent behavior, behavior under errors and cancelled threads, and correct operation of SSE streaming.
 *   `example.py`: Interactive client-server script that starts the FastAPI server, sends sequential requests, and simulates concurrent bursts to demonstrate dynamic batching while displaying live logs.
 
+## Using it as a package
+
+Since `0.1.0` the code lives in the `llm_inference_server` package and the repository is
+pip-installable, so other projects can depend on it instead of copying files
+or editing `sys.path`:
+
+```bash
+pip install "llm-inference-server @ git+https://github.com/juanmmm21/llm-inference-server.git@v0.1.0"
+```
+
+```python
+from llm_inference_server import InferenceEngine, InferenceEngineError
+```
+
+The old top-level modules are kept as thin re-exports, so scripts that add
+this folder to `sys.path` keep working. This component imports no other
+ai-core component: they are combined in the `aicore` SDK of
+[ai-core-infra-hub](https://github.com/juanmmm21/ai-core-infra-hub), which
+passes collaborators (vector stores, encoders, tokenizers) in by injection.
+
+Development: `pip install -e ".[dev]"`, then `pytest` and `ruff check .`.
+
 ## Installation and Serving
 
 ### 1. Install Dependencies

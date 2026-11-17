@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 import httpx
-from server import app
+from llm_inference_server.server import app
 
 
 class TestLLMInferenceServer(unittest.IsolatedAsyncioTestCase):

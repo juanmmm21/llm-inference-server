@@ -3,3 +3,8 @@ __pycache__/
 .venv/
 .env
 *.log
+
+# Packaging
+build/
+dist/
+*.egg-info/
