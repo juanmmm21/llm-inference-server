@@ -1,7 +1,7 @@
 import time
 import random
 import logging
-from typing import List, Generator, Optional
+from typing import List, Generator
 
 logger = logging.getLogger(__name__)
 
