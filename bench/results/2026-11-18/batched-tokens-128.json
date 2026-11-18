@@ -1,0 +1,35 @@
+{
+  "label": "b128",
+  "rows": [
+    {
+      "concurrency": 1,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 23.830703355999503,
+      "ttft_p50": 0.11759785749927687,
+      "ttft_p95": 0.13902621175020613,
+      "decode_tps_p50": 92.66781326856187,
+      "throughput_tps": 85.93955324799111
+    },
+    {
+      "concurrency": 4,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 15.999157342999752,
+      "ttft_p50": 0.438514433999444,
+      "ttft_p95": 0.4611013090002416,
+      "decode_tps_p50": 35.60337064629168,
+      "throughput_tps": 128.0067416110561
+    },
+    {
+      "concurrency": 8,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 15.08169363900015,
+      "ttft_p50": 0.6392527224998048,
+      "ttft_p95": 0.9226047227489289,
+      "decode_tps_p50": 18.491310845217498,
+      "throughput_tps": 135.79376753178587
+    }
+  ]
+}

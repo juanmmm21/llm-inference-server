@@ -1,0 +1,35 @@
+{
+  "label": "ollama",
+  "rows": [
+    {
+      "concurrency": 1,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 21.73712269399948,
+      "ttft_p50": 0.05247662600049807,
+      "ttft_p95": 0.07011472250042061,
+      "decode_tps_p50": 98.10016073715809,
+      "throughput_tps": 94.21670148484505
+    },
+    {
+      "concurrency": 4,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 11.416353100999913,
+      "ttft_p50": 0.17673381500026153,
+      "ttft_p95": 0.2936249320009665,
+      "decode_tps_p50": 47.993481385208774,
+      "throughput_tps": 179.3917884180215
+    },
+    {
+      "concurrency": 8,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 9.520494565998888,
+      "ttft_p50": 0.06871888949990534,
+      "ttft_p95": 0.39749732474956545,
+      "decode_tps_p50": 28.039326728212295,
+      "throughput_tps": 215.11487515723658
+    }
+  ]
+}

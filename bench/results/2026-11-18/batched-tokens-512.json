@@ -1,0 +1,35 @@
+{
+  "label": "b512",
+  "rows": [
+    {
+      "concurrency": 1,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 24.223824795999462,
+      "ttft_p50": 0.11606605400083936,
+      "ttft_p95": 0.13572675200066442,
+      "decode_tps_p50": 91.61039230359596,
+      "throughput_tps": 84.54486511718103
+    },
+    {
+      "concurrency": 4,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 16.7024915410002,
+      "ttft_p50": 0.42919276249995164,
+      "ttft_p95": 0.46219950524937303,
+      "decode_tps_p50": 32.75427496342901,
+      "throughput_tps": 122.61643689342405
+    },
+    {
+      "concurrency": 8,
+      "requests": 16,
+      "output_tokens": 2048,
+      "wall_s": 14.751373293000142,
+      "ttft_p50": 0.8506461705010224,
+      "ttft_p95": 0.8750715374994797,
+      "decode_tps_p50": 19.337519225506583,
+      "throughput_tps": 138.83453149218465
+    }
+  ]
+}
