@@ -1,0 +1,1 @@
+{"mode": "per-sequence", "mlx": "0.32.4", "machine": "Ryzen 7 7700X, WSL2, MLX CPU build", "model": "random-weight Qwen2 0.5B shape, 8 layers, vocab 32k, bf16", "c1": {"tokens_per_s": 6.1, "mean_ttft_s": 2.4719, "wall_s": 5.27}, "c4": {"tokens_per_s": 6.1, "mean_ttft_s": 9.9067, "wall_s": 21.07}, "c8": {"tokens_per_s": 6.1, "mean_ttft_s": 19.8266, "wall_s": 42.17}}
