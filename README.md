@@ -80,6 +80,60 @@ TTFT, preemptions, KV usage and prefix hit rate). Chat templates come from the m
 prompts with an explicit system message so both servers see the same tokens) at 1, 4 and 8
 concurrent clients, 16 requests per level, after a warm-up request.
 
+### Desktop CPU, profiled under load (2026-11-18)
+
+* **Machine**: AMD Ryzen 7 7700X under WSL2 (16 threads visible, 7.5 GB RAM), no GPU; both servers
+  pinned to 4 threads.
+* **Model**: the same `qwen2.5-0.5b-instruct-q4_k_m.gguf` file for both servers.
+* **llm-inference-server 0.1.0**: llama.cpp backend through the prebuilt llama-cpp-python 0.3.36
+  wheel from PyPI, `--threads 4 --max-num-seqs 8 --kv-tokens 8192`, Python 3.12, with
+  `--max-num-batched-tokens` set to 64, 128, 256 and 512 (the default).
+* **Ollama 0.40.6**: native Linux binary (CPU), `OLLAMA_NUM_PARALLEL=8`, the GGUF imported with
+  `bench/Modelfile` (`num_thread 4`, `num_ctx 2048`, plus `num_gpu 0`).
+* All runs back to back, nothing else running.
+
+Eight clients, by token budget per step:
+
+| Server | `max_num_batched_tokens` | TTFT p50 (s) | TTFT p95 (s) | Decode per request p50 (tok/s) | Aggregate throughput (tok/s) |
+| --- | --- | --- | --- | --- | --- |
+| llm-inference-server | 64 | 0.538 | 1.005 | 17.4 | 129.6 |
+| llm-inference-server | 128 | 0.639 | 0.923 | 18.5 | 135.8 |
+| llm-inference-server | 256 | 0.871 | 0.877 | 19.0 | 137.6 |
+| llm-inference-server | 512 | 0.851 | 0.875 | 19.3 | 138.8 |
+| Ollama | — | 0.069 | 0.397 | 28.0 | 215.1 |
+
+Default budget (512) against Ollama at every load level:
+
+| Server | Clients | TTFT p50 (s) | TTFT p95 (s) | Decode per request p50 (tok/s) | Aggregate throughput (tok/s) |
+| --- | --- | --- | --- | --- | --- |
+| llm-inference-server | 1 | 0.116 | 0.136 | 91.6 | 84.5 |
+| Ollama | 1 | 0.052 | 0.070 | 98.1 | 94.2 |
+| llm-inference-server | 4 | 0.429 | 0.462 | 32.8 | 122.6 |
+| Ollama | 4 | 0.177 | 0.294 | 48.0 | 179.4 |
+| llm-inference-server | 8 | 0.851 | 0.875 | 19.3 | 138.8 |
+| Ollama | 8 | 0.069 | 0.397 | 28.0 | 215.1 |
+
+What the numbers say:
+
+* **The token budget moves the median first token, not the gap.** The benchmark prompts are
+  31 to 36 tokens, so with 8 clients arriving together a budget of 512 prefills all of them in
+  one step (256, all but one) and the first tokens come out together (p50 ≈ p95 ≈ 0.87 s). A budget of 128
+  admits four per step and 64 admits two: the first arrivals answer sooner and the last ones
+  later. Going from 512 to 128 lowers the TTFT p50 by 25 % (0.85 → 0.64 s) for 2 % less
+  throughput; 64 lowers it by 37 % (0.54 s) but costs 7 % of throughput and pushes p95 past 1 s.
+  The default stays at 512; `--max-num-batched-tokens 128` is the setting for interactive load.
+* **Ollama is still well ahead on this machine**: 215 against 139 tokens/s with 8 clients (this
+  engine reaches 65 %), a first token in 0.07 s against 0.64 s at best, and even with one client
+  it decodes 7 % faster (98.1 against 91.6 tokens/s).
+* **The time is spent inside llama.cpp, not in Python or HTTP.** A `py-spy` profile of an
+  8-client run (200 Hz, `--threads`, 3,892 samples) puts 98.6 % of the engine thread's samples
+  inside `llama_decode`; the scheduler, sampling and logit copies add up to about 1.4 %, and the
+  HTTP thread was awake for 1 % of the samples. The remaining gap is therefore in how the batch
+  runs inside llama.cpp — this run used the prebuilt wheel, while the 2026-11-17 run below used a
+  native source build — rather than in the step loop or the HTTP thread.
+
+### Cloud container (2026-11-17)
+
 * **Machine**: cloud container, Intel Xeon @ 2.10 GHz, 4 vCPU (AVX-512, AMX), 15 GB RAM, no GPU.
 * **Model**: `qwen2.5-0.5b-instruct-q4_k_m.gguf` from `Qwen/Qwen2.5-0.5B-Instruct-GGUF`
   (sha256 `74a4da8c9fdbcd15…`), the **same file** for both servers.
@@ -117,14 +171,15 @@ What the numbers say:
 Reproduce:
 
 ```bash
-python -m llm_inference_server --backend llamacpp --model qwen2.5-0.5b-instruct-q4_k_m.gguf --served-name qwen2.5-0.5b --threads 4 &
+python -m llm_inference_server --backend llamacpp --model qwen2.5-0.5b-instruct-q4_k_m.gguf --served-name qwen2.5-0.5b --threads 4 --max-num-batched-tokens 512 &
+py-spy record -o profile.txt -f raw -r 200 --threads --pid <server pid>   # optional profile
 python bench/benchmark.py --url http://127.0.0.1:8000/v1 --model qwen2.5-0.5b --concurrency 1,4,8 --requests 16
 docker run -d -e OLLAMA_NUM_PARALLEL=8 -v $PWD/models:/models -p 11434:11434 ollama/ollama
 docker exec <container> ollama create qwen05 -f /models/Modelfile   # bench/Modelfile
 python bench/benchmark.py --url http://127.0.0.1:11434/v1 --model qwen05 --concurrency 1,4,8 --requests 16
 ```
 
-Raw results: `bench/results/*.json`.
+Raw results: `bench/results/*.json` (2026-11-17) and `bench/results/2026-11-18/*.json`.
 
 **MLX** was exercised on MLX's Linux CPU build (0.32.4): correct, but that build is not meant
 for speed (4-bit checkpoints take ~19 s per token even in `mlx-lm` itself), so it is not in the
