@@ -57,7 +57,7 @@ actually been computed enter the prefix cache.
 | --- | --- | --- | --- | --- |
 | `llamacpp` | GGUF | yes: all sequences in one `llama_batch`, one llama.cpp sequence id each | llama.cpp's own (unified, `n_ctx` cells); the block manager does admission and preemption | no |
 | `torch` | Hugging Face (Qwen2 / Llama architectures) | yes: every linear layer runs once for all tokens of the step; attention per sequence | **our block pool**, read and written through the block tables | yes |
-| `mlx` | `mlx-lm` checkpoints | no: one forward per sequence per step (mlx-lm takes one RoPE offset per call) | **our block pool**, behind mlx-lm's cache interface | yes |
+| `mlx` | `mlx-lm` checkpoints | yes: right-padded `[B, L]` batch with one RoPE offset per row and our own attention mask; chunks of very different lengths go in separate calls | **our block pool**, behind mlx-lm's cache interface | yes |
 | `toy` | — | yes | — | yes |
 
 The torch backend is the reference implementation of paged attention here: its forward pass
@@ -65,6 +65,18 @@ The torch backend is the reference implementation of paged attention here: its f
 against Hugging Face — logits within 3·10⁻⁵ and identical greedy tokens with batching, chunked
 prefill and prefix-cache hits (`test_torch_backend.py`). The MLX backend reproduces `mlx-lm`'s
 own greedy generation token for token with its KV in our pool (`test_mlx_backend.py`).
+
+How the MLX backend batches: mlx-lm's attention layers pass `cache.offset` to `mx.fast.rope`,
+which accepts one offset per batch row, so the step's chunks become a right-padded `[B, L]`
+batch whose cache object carries a vector of start positions. Each layer's cache writes the real
+tokens' K/V into the block pool at their slots, gathers every row's context back as
+`[B, n_kv, C, d]`, and hands mlx-lm a `[B, 1, L, C]` mask that lets each query see only its own
+context up to its own position. Padding is wasted work, so the step is split into calls of
+similar length (`plan_groups`: at most 1.5 padded tokens per real token): all the decodes run
+together and a long prefill chunk does not pad them up to its length. `test_mlx_layout.py`
+checks the layout and compares every step's logits — mixed prefills, decodes and prefix-cache
+hits in one call — with a cache-free mlx-lm forward on a small random-weight Qwen2 (CI installs
+MLX's CPU build for it).
 
 ### API (`server.py`)
 
@@ -183,7 +195,12 @@ Raw results: `bench/results/*.json` (2026-11-17) and `bench/results/2026-11-18/*
 
 **MLX** was exercised on MLX's Linux CPU build (0.32.4): correct, but that build is not meant
 for speed (4-bit checkpoints take ~19 s per token even in `mlx-lm` itself), so it is not in the
-table. Its real target is Apple silicon, where it has not been measured.
+table. Its real target is Apple silicon, where it has not been measured. On that CPU build
+(Ryzen 7 7700X, WSL2; a random-weight model with Qwen2.5-0.5B's width and 8 layers in bf16, 64
+prompt tokens and 32 output tokens per request), running the sequences of a step in one call
+instead of one call each raises throughput from 6.1 to 8.0 tokens/s with 4 requests and to 8.4
+with 8 (+38 %); with one request both are 6.0–6.1. Raw results:
+`bench/results/2026-11-18/mlx-cpu-*.json`.
 
 ## Using it as a package
 
