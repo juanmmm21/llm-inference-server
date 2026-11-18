@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 llamacpp = ["llama-cpp-python>=0.3.16"]
-mlx = ["mlx>=0.25", "mlx-lm>=0.25"]
+mlx = ["mlx>=0.32", "mlx-lm>=0.32"]
 torch = ["torch>=2.1", "transformers>=4.45"]
 bench = ["httpx>=0.24"]
 dev = ["pytest>=8", "ruff>=0.6", "httpx>=0.24"]

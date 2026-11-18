@@ -18,3 +18,14 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check .
       - run: pytest -q
+
+  mlx:
+    # el backend MLX con varias secuencias por llamada, contra mlx-lm, en la versión de CPU de MLX
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]" "mlx[cpu]>=0.32" "mlx-lm>=0.32"
+      - run: pytest -q test_mlx_layout.py
